@@ -100,19 +100,16 @@ resource "aws_security_group_rule" "mysql_internal" {
 # ECR
 ############################
 
-resource "aws_ecr_repository" "backend_ventas" {
+data "aws_ecr_repository" "backend_ventas" {
   name         = "${var.project_name}-backend-ventas"
-  force_delete = true
 }
 
-resource "aws_ecr_repository" "backend_despachos" {
+data "aws_ecr_repository" "backend_despachos" {
   name         = "${var.project_name}-backend-despachos"
-  force_delete = true
 }
 
-resource "aws_ecr_repository" "frontend" {
+data "aws_ecr_repository" "frontend" {
   name         = "${var.project_name}-frontend"
-  force_delete = true
 }
 
 ############################
@@ -208,7 +205,7 @@ resource "aws_ecs_task_definition" "app" {
   container_definitions = jsonencode([
     {
       name  = "backend-ventas"
-      image = "$${aws_ecr_repository.backend_ventas.repository_url}:latest"
+      image = "${data.aws_ecr_repository.backend_ventas.repository_url}:latest"
 
       portMappings = [
         {
@@ -256,7 +253,7 @@ resource "aws_ecs_task_definition" "app" {
     },
     {
       name  = "backend-despachos"
-      image = "$${aws_ecr_repository.backend_despachos.repository_url}:latest"
+      image = "${data.aws_ecr_repository.backend_despachos.repository_url}:latest"
 
       portMappings = [
         {
@@ -304,7 +301,7 @@ resource "aws_ecs_task_definition" "app" {
     },
     {
       name  = "frontend"
-      image = "$${aws_ecr_repository.frontend.repository_url}:latest"
+      image = "${data.aws_ecr_repository.frontend.repository_url}:latest"
 
       portMappings = [
         {
