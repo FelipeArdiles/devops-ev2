@@ -133,6 +133,8 @@ resource "aws_instance" "db" {
   vpc_security_group_ids = [aws_security_group.main.id]
   key_name               = var.key_pair_name
 
+  user_data_replace_on_change = true
+
   root_block_device {
     volume_size = 20
     volume_type = "gp3"
@@ -199,7 +201,7 @@ resource "aws_ecs_task_definition" "app" {
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "1024"
-  memory                   = "3072"
+  memory                   = "4096"
   execution_role_arn       = data.aws_iam_role.lab.arn
 
   container_definitions = jsonencode([
@@ -221,6 +223,10 @@ resource "aws_ecs_task_definition" "app" {
       }
 
       environment = [
+        {
+            name  = "JAVA_TOOL_OPTIONS",
+            value = "-Xmx896m -Xms256m"
+        },
         {
             name  = "DB_ENDPOINT",
             value = aws_instance.db.private_ip
@@ -268,7 +274,18 @@ resource "aws_ecs_task_definition" "app" {
         startPeriod = 120
       }
 
+      dependsOn = [
+        {
+          containerName = "backend-ventas",
+          condition     = "HEALTHY"
+        }
+      ]
+
       environment = [
+        {
+            name  = "JAVA_TOOL_OPTIONS",
+            value = "-Xmx896m -Xms256m"
+        },
         {
             name  = "DB_ENDPOINT",
             value = aws_instance.db.private_ip
@@ -312,11 +329,11 @@ resource "aws_ecs_task_definition" "app" {
       dependsOn = [
         {
           containerName = "backend-ventas",
-          condition = "START"
+          condition     = "HEALTHY"
         },
         {
           containerName = "backend-despachos",
-          condition = "START"
+          condition     = "HEALTHY"
         }
       ]
       logConfiguration = {
