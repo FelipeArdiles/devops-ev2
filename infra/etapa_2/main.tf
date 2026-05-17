@@ -80,20 +80,21 @@ resource "aws_security_group" "main" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # MySQL entre ECS y EC2 (mismo security group). Debe ir inline:
+  # una regla separada aws_security_group_rule se pierde al actualizar este SG.
+  ingress {
+    from_port = 3306
+    to_port   = 3306
+    protocol  = "tcp"
+    self      = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-}
-resource "aws_security_group_rule" "mysql_internal" {
-  type                     = "ingress"
-  from_port                = 3306
-  to_port                  = 3306
-  protocol                 = "tcp"
-  security_group_id        = aws_security_group.main.id
-  source_security_group_id = aws_security_group.main.id
 }
 
 ############################
@@ -132,8 +133,6 @@ resource "aws_instance" "db" {
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.main.id]
   key_name               = var.key_pair_name
-
-  user_data_replace_on_change = true
 
   root_block_device {
     volume_size = 20
