@@ -6,7 +6,9 @@ variable "project_name" {
 }
 variable "db_user" {}
 variable "db_password" {}
-variable "db_name" {}
+variable "db_name" {
+  default = "proyecto_db"
+}
 variable "key_pair_name" {
   description = "Key Pair de EC2 para SSH a la instancia MySQL (p. ej. vockey en AWS Academy)."
   default     = "vockey"
