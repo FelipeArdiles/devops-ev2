@@ -162,7 +162,7 @@ resource "aws_instance" "db" {
     -p 3306:3306 \
     --log-opt max-size=10m \
     --log-opt max-file=3 \
-    mysql:8 \
+    mysql:8-oracle \
     --bind-address=0.0.0.0 \
     --performance-schema=OFF
   EOF
@@ -199,7 +199,7 @@ resource "aws_ecs_task_definition" "app" {
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = "1024"
-  memory                   = "2048"
+  memory                   = "3072"
   execution_role_arn       = data.aws_iam_role.lab.arn
 
   container_definitions = jsonencode([
@@ -213,7 +213,7 @@ resource "aws_ecs_task_definition" "app" {
         }
       ]
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8080/api/v1/ventas || exit 1"]
+        command     = ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health/readiness || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 5
@@ -261,7 +261,7 @@ resource "aws_ecs_task_definition" "app" {
         }
       ]
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8081/api/v1/despachos || exit 1"]
+        command     = ["CMD-SHELL", "curl -f http://localhost:8081/actuator/health/readiness || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 5
