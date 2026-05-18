@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Despliegue completo para evaluación (AWS Academy / lab educativo).
+# Despliegue completo para evaluación EP2 (EC2 + ECR).
 # Uso:
-#   ./scripts/deploy-evaluacion.sh deploy    # Infra + imágenes + ECS
-#   ./scripts/deploy-evaluacion.sh destroy   # Apaga todo en AWS
-#   ./scripts/deploy-evaluacion.sh status    # Estado del servicio e IP
-#   ./scripts/deploy-evaluacion.sh pipeline  # Solo imágenes + redespliegue (infra ya existe)
+#   ./scripts/deploy-evaluacion.sh deploy    # Infra + imágenes + EC2
+#   ./scripts/deploy-evaluacion.sh destroy  # Apaga todo en AWS
+#   ./scripts/deploy-evaluacion.sh status    # Estado e IPs
+#   ./scripts/deploy-evaluacion.sh pipeline # Solo imágenes + redespliegue EC2
 #
 # Requisitos: aws cli, terraform, docker, credenciales AWS del lab activas.
 
@@ -17,18 +17,18 @@ ETAPA2_DIR="${ROOT_DIR}/infra/etapa_2"
 
 # shellcheck source=/dev/null
 [[ -f "${SCRIPT_DIR}/deploy.env" ]] && source "${SCRIPT_DIR}/deploy.env"
+# shellcheck source=/dev/null
 [[ -f "${ROOT_DIR}/.env" ]] && source "${ROOT_DIR}/.env"
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 PROJECT_NAME="${PROJECT_NAME:-devops-u2}"
-CLUSTER_NAME="${CLUSTER_NAME:-devops-u2-cluster}"
-SERVICE_NAME="${SERVICE_NAME:-app}"
 DB_USER="${DB_USER:-root}"
 DB_PASSWORD="${DB_PASSWORD:-root}"
 DB_NAME="${DB_NAME:-proyecto_db}"
 KEY_PAIR_NAME="${KEY_PAIR_NAME:-vockey}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-${HOME}/.ssh/vockey.pem}"
 MYSQL_READY_TIMEOUT="${MYSQL_READY_TIMEOUT:-300}"
-ECS_READY_TIMEOUT="${ECS_READY_TIMEOUT:-600}"
+APP_READY_TIMEOUT="${APP_READY_TIMEOUT:-600}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -53,15 +53,14 @@ check_prereqs() {
   need_cmd terraform
   need_cmd docker
   if ! aws sts get-caller-identity --region "${AWS_REGION}" >/dev/null 2>&1; then
-    err "Credenciales AWS no válidas. Inicia el lab y exporta keys + session token."
+    err "Credenciales AWS no válidas. Ejecuta aws configure o exporta las keys del lab."
     exit 1
   fi
   log "Cuenta AWS: $(aws sts get-caller-identity --query Account --output text)"
 }
 
 tf_vars_etapa2() {
-  echo -var="db_user=${DB_USER}" \
-       -var="db_password=${DB_PASSWORD}" \
+  echo -var="db_password=${DB_PASSWORD}" \
        -var="db_name=${DB_NAME}" \
        -var="key_pair_name=${KEY_PAIR_NAME}"
 }
@@ -81,41 +80,34 @@ terraform_init_apply() {
 
 terraform_destroy() {
   local dir="$1"
-  if [[ ! -d "${dir}" ]]; then
-    return 0
-  fi
   log "Terraform destroy en ${dir}..."
   (cd "${dir}" && terraform init -input=false)
   if [[ "${dir}" == *etapa_2* ]]; then
     # shellcheck disable=SC2046
-    (cd "${dir}" && terraform destroy -auto-approve $(tf_vars_etapa2)) || warn "Destroy etapa_2 con advertencias (puede estar vacío)."
+    (cd "${dir}" && terraform destroy -auto-approve $(tf_vars_etapa2)) || warn "Destroy etapa_2 con advertencias."
   else
-    (cd "${dir}" && terraform destroy -auto-approve) || warn "Destroy etapa_1 con advertencias (puede estar vacío)."
+    (cd "${dir}" && terraform destroy -auto-approve) || warn "Destroy etapa_1 con advertencias."
   fi
 }
 
 clean_local_state() {
-  warn "Eliminando terraform.tfstate local (útil tras reset del lab)..."
+  warn "Eliminando terraform.tfstate local..."
   rm -f "${ETAPA1_DIR}"/terraform.tfstate "${ETAPA1_DIR}"/terraform.tfstate.backup
   rm -f "${ETAPA2_DIR}"/terraform.tfstate "${ETAPA2_DIR}"/terraform.tfstate.backup
 }
 
-get_mysql_private_ip() {
-  aws ec2 describe-instances \
-    --region "${AWS_REGION}" \
-    --filters "Name=tag:Name,Values=${PROJECT_NAME}-mysql" "Name=instance-state-name,Values=running" \
-    --query 'Reservations[0].Instances[0].PrivateIpAddress' \
-    --output text 2>/dev/null || true
+get_tf_output() {
+  local name="$1"
+  (cd "${ETAPA2_DIR}" && terraform output -raw "${name}" 2>/dev/null) || true
 }
 
-wait_for_mysql() {
-  local host="$1"
-  local port=3306
+wait_for_tcp() {
+  local host="$1" port="$2" timeout="${3:-300}"
   local elapsed=0
-  log "Esperando MySQL en ${host}:${port} (máx ${MYSQL_READY_TIMEOUT}s)..."
-  while (( elapsed < MYSQL_READY_TIMEOUT )); do
+  log "Esperando ${host}:${port} (máx ${timeout}s)..."
+  while (( elapsed < timeout )); do
     if (echo >"/dev/tcp/${host}/${port}") >/dev/null 2>&1; then
-      log "MySQL responde en el puerto ${port}."
+      log "Puerto ${port} disponible en ${host}."
       return 0
     fi
     sleep 5
@@ -123,8 +115,7 @@ wait_for_mysql() {
     echo -n "."
   done
   echo ""
-  err "MySQL no respondió a tiempo. Revisa la EC2 ${PROJECT_NAME}-mysql en la consola."
-  exit 1
+  return 1
 }
 
 ecr_login() {
@@ -138,8 +129,7 @@ ecr_login() {
 }
 
 build_and_push_images() {
-  local account_id="${AWS_ACCOUNT_ID}"
-  local registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  local registry="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
   log "Build y push backend ventas..."
   docker build --platform linux/amd64 \
@@ -160,74 +150,69 @@ build_and_push_images() {
   docker push "${registry}/${PROJECT_NAME}-frontend:latest"
 }
 
-ecs_force_deploy() {
-  log "Redespliegue forzado en ECS (${CLUSTER_NAME}/${SERVICE_NAME})..."
-  aws ecs update-service \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --service "${SERVICE_NAME}" \
-    --force-new-deployment \
-    --output text \
-    --query 'service.serviceName' >/dev/null
+ssh_opts() {
+  echo -o StrictHostKeyChecking=no -o ConnectTimeout=15 -i "${SSH_KEY_PATH}"
 }
 
-get_task_public_ip() {
-  local task_arn eni_id
-  task_arn="$(aws ecs list-tasks \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --service-name "${SERVICE_NAME}" \
-    --desired-status RUNNING \
-    --query 'taskArns[0]' \
-    --output text 2>/dev/null || true)"
-  [[ -z "${task_arn}" || "${task_arn}" == "None" ]] && return 1
-  eni_id="$(aws ecs describe-tasks \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --tasks "${task_arn}" \
-    --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value | [0]' \
-    --output text)"
-  aws ec2 describe-network-interfaces \
-    --region "${AWS_REGION}" \
-    --network-interface-ids "${eni_id}" \
-    --query 'NetworkInterfaces[0].Association.PublicIp' \
-    --output text
+deploy_remote() {
+  local frontend_ip="$1"
+  local backend_ip="$2"
+
+  if [[ ! -f "${SSH_KEY_PATH}" ]]; then
+    err "No se encontró la llave SSH: ${SSH_KEY_PATH}"
+    err "Ajusta SSH_KEY_PATH en scripts/deploy.env"
+    exit 1
+  fi
+  chmod 600 "${SSH_KEY_PATH}" 2>/dev/null || true
+
+  log "Esperando cloud-init en instancias (90s)..."
+  sleep 90
+
+  log "Desplegando backends en ${backend_ip} vía bastión ${frontend_ip}..."
+  # shellcheck disable=SC2046
+  ssh $(ssh_opts) -A "ec2-user@${frontend_ip}" \
+    "ssh -o StrictHostKeyChecking=no ec2-user@${backend_ip} 'sudo /opt/app/deploy.sh'"
+
+  log "Desplegando frontend en ${frontend_ip}..."
+  # shellcheck disable=SC2046
+  ssh $(ssh_opts) "ec2-user@${frontend_ip}" 'sudo /opt/app/deploy.sh'
 }
 
-wait_for_ecs() {
+wait_for_http() {
+  local url="$1"
   local elapsed=0
-  log "Esperando task ECS healthy (máx ${ECS_READY_TIMEOUT}s)..."
-  while (( elapsed < ECS_READY_TIMEOUT )); do
-    local running
-    running="$(aws ecs describe-services \
-      --region "${AWS_REGION}" \
-      --cluster "${CLUSTER_NAME}" \
-      --services "${SERVICE_NAME}" \
-      --query 'services[0].runningCount' \
-      --output text 2>/dev/null || echo 0)"
-    if [[ "${running}" == "1" ]]; then
-      local health
-      health="$(aws ecs describe-services \
-        --region "${AWS_REGION}" \
-        --cluster "${CLUSTER_NAME}" \
-        --services "${SERVICE_NAME}" \
-        --query 'services[0].events[0].message' \
-        --output text 2>/dev/null || true)"
-      local ip
-      if ip="$(get_task_public_ip 2>/dev/null)" && [[ -n "${ip}" && "${ip}" != "None" ]]; then
-        if curl -sf --connect-timeout 5 "http://${ip}/" >/dev/null 2>&1; then
-          log "Servicio listo en http://${ip}/"
-          return 0
-        fi
-      fi
+  log "Esperando HTTP en ${url} (máx ${APP_READY_TIMEOUT}s)..."
+  while (( elapsed < APP_READY_TIMEOUT )); do
+    if curl -sf --connect-timeout 5 "${url}" >/dev/null 2>&1; then
+      log "Aplicación lista: ${url}"
+      return 0
     fi
     sleep 10
     elapsed=$((elapsed + 10))
     echo -n "."
   done
   echo ""
-  warn "ECS aún no respondió HTTP 200. Revisa logs en CloudWatch: /ecs/${PROJECT_NAME}"
+  warn "La app no respondió HTTP 200 a tiempo."
   return 1
+}
+
+print_github_secrets() {
+  local frontend_ip backend_ip account_id
+  frontend_ip="$(get_tf_output frontend_public_ip)"
+  backend_ip="$(get_tf_output backend_private_ip)"
+  account_id="$(aws sts get-caller-identity --query Account --output text)"
+
+  echo ""
+  log "=== Secrets para GitHub Actions (rama deploy) ==="
+  echo "  AWS_ACCESS_KEY_ID          = (del lab)"
+  echo "  AWS_SECRET_ACCESS_KEY      = (del lab)"
+  echo "  AWS_SESSION_TOKEN          = (del lab, si aplica)"
+  echo "  AWS_ACCOUNT_ID             = ${account_id}"
+  echo "  EC2_SSH_PRIVATE_KEY        = contenido de ${SSH_KEY_PATH}"
+  echo "  EC2_FRONTEND_HOST          = ${frontend_ip}"
+  echo "  EC2_BACKEND_PRIVATE_IP     = ${backend_ip}"
+  echo ""
+  warn "Haz push a la rama 'deploy' para disparar el pipeline CI/CD."
 }
 
 cmd_deploy() {
@@ -235,40 +220,36 @@ cmd_deploy() {
   [[ "${1:-}" == "--fresh" ]] && fresh=true
 
   check_prereqs
-  if [[ "${fresh}" == "true" ]]; then
-    clean_local_state
-  fi
+  [[ "${fresh}" == "true" ]] && clean_local_state
 
   log "=== Etapa 1: ECR ==="
   terraform_init_apply "${ETAPA1_DIR}"
 
-  log "=== Etapa 2: VPC + MySQL + ECS ==="
+  log "=== Etapa 2: VPC + EC2 (MySQL, Backend, Frontend) ==="
   terraform_init_apply "${ETAPA2_DIR}"
 
-  local mysql_private
-  mysql_private="$(get_mysql_private_ip)"
-  if [[ -z "${mysql_private}" || "${mysql_private}" == "None" ]]; then
-    err "No se obtuvo IP privada de MySQL. Revisa la instancia ${PROJECT_NAME}-mysql."
-    exit 1
-  fi
-  wait_for_mysql "${mysql_private}"
+  local mysql_ip backend_ip frontend_ip
+  mysql_ip="$(get_tf_output mysql_private_ip)"
+  backend_ip="$(get_tf_output backend_private_ip)"
+  frontend_ip="$(get_tf_output frontend_public_ip)"
 
-  log "=== Imágenes Docker + ECS ==="
+  wait_for_tcp "${mysql_ip}" 3306 "${MYSQL_READY_TIMEOUT}" || {
+    err "MySQL no respondió. Revisa la instancia ${PROJECT_NAME}-mysql."
+    exit 1
+  }
+
+  log "=== Imágenes Docker + despliegue EC2 ==="
   ecr_login
   build_and_push_images
-  ecs_force_deploy
-  wait_for_ecs || true
+  deploy_remote "${frontend_ip}" "${backend_ip}"
+  wait_for_http "http://${frontend_ip}/" || true
 
   echo ""
   log "=== Resumen ==="
-  echo "  Cluster:  ${CLUSTER_NAME}"
-  echo "  Servicio: ${SERVICE_NAME}"
-  echo "  MySQL EC2 (pública): $(cd "${ETAPA2_DIR}" && terraform output -raw mysql_ip 2>/dev/null || echo '?')"
-  local url_ip
-  url_ip="$(get_task_public_ip 2>/dev/null || echo '?')"
-  echo "  App (frontend):      http://${url_ip}/"
-  echo ""
-  warn "Actualiza los secrets de GitHub Actions si también usarás el pipeline desde GitHub."
+  echo "  Frontend (Internet): http://${frontend_ip}/"
+  echo "  Backend (privado):   ${backend_ip}"
+  echo "  MySQL (privado):     ${mysql_ip}"
+  print_github_secrets
 }
 
 cmd_destroy() {
@@ -276,49 +257,41 @@ cmd_destroy() {
   log "=== Destruyendo infraestructura ==="
   terraform_destroy "${ETAPA2_DIR}"
   terraform_destroy "${ETAPA1_DIR}"
-  log "Recursos eliminados. Puedes resetear el lab sin problema."
+  log "Recursos eliminados."
 }
 
 cmd_pipeline() {
   check_prereqs
+  local frontend_ip backend_ip
+  frontend_ip="$(get_tf_output frontend_public_ip)"
+  backend_ip="$(get_tf_output backend_private_ip)"
+  if [[ -z "${frontend_ip}" || -z "${backend_ip}" ]]; then
+    err "No hay outputs de Terraform. Ejecuta primero: ./scripts/deploy-evaluacion.sh deploy"
+    exit 1
+  fi
   ecr_login
   build_and_push_images
-  ecs_force_deploy
-  wait_for_ecs || true
-  local ip
-  ip="$(get_task_public_ip 2>/dev/null || echo '?')"
-  log "App: http://${ip}/"
+  deploy_remote "${frontend_ip}" "${backend_ip}"
+  wait_for_http "http://${frontend_ip}/" || true
+  log "App: http://${frontend_ip}/"
 }
 
 cmd_status() {
   check_prereqs
-  local running desired
-  running="$(aws ecs describe-services \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --services "${SERVICE_NAME}" \
-    --query 'services[0].runningCount' \
-    --output text 2>/dev/null || echo '?')"
-  desired="$(aws ecs describe-services \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --services "${SERVICE_NAME}" \
-    --query 'services[0].desiredCount' \
-    --output text 2>/dev/null || echo '?')"
-  echo "ECS ${CLUSTER_NAME}/${SERVICE_NAME}: ${running}/${desired} tasks"
-  aws ecs describe-services \
-    --region "${AWS_REGION}" \
-    --cluster "${CLUSTER_NAME}" \
-    --services "${SERVICE_NAME}" \
-    --query 'services[0].events[0:3].message' \
-    --output table 2>/dev/null || true
-  local ip
-  if ip="$(get_task_public_ip 2>/dev/null)"; then
-    echo "URL: http://${ip}/"
-    curl -sf --connect-timeout 5 -o /dev/null -w "HTTP: %{http_code}\n" "http://${ip}/" || true
-  else
-    warn "No hay task RUNNING con IP pública."
+  local frontend_ip backend_ip mysql_ip
+  frontend_ip="$(get_tf_output frontend_public_ip)"
+  backend_ip="$(get_tf_output backend_private_ip)"
+  mysql_ip="$(get_tf_output mysql_private_ip)"
+
+  echo "Frontend público:  ${frontend_ip:-?}  -> http://${frontend_ip:-}/"
+  echo "Backend privado:   ${backend_ip:-?}"
+  echo "MySQL privado:     ${mysql_ip:-?}"
+
+  if [[ -n "${frontend_ip}" && "${frontend_ip}" != "?" ]]; then
+    curl -sf --connect-timeout 5 -o /dev/null -w "HTTP frontend: %{http_code}\n" \
+      "http://${frontend_ip}/" || warn "Frontend no responde HTTP."
   fi
+  print_github_secrets
 }
 
 main() {
