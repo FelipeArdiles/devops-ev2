@@ -1,0 +1,37 @@
+name: Integracion continua
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Build backend ventas
+        run: |
+          docker build \
+            -t ventas-backend:ci \
+            ./back-Ventas_SpringBoot/Springboot-API-REST
+
+      - name: Build backend despachos
+        run: |
+          docker build \
+            -t despachos-backend:ci \
+            ./back-Despachos_SpringBoot/Springboot-API-REST-DESPACHO
+
+      - name: Build frontend
+        run: |
+          docker build \
+            -t despacho-frontend:ci \
+            ./front_despacho

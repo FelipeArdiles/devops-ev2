@@ -67,21 +67,23 @@ En el repositorio → **Settings → Secrets and variables → Actions**:
 
 Tras cada `terraform apply` que cambie IPs, actualiza `EC2_FRONTEND_HOST` y `EC2_BACKEND_PRIVATE_IP`.
 
-### 4. Pipeline CI/CD (rama `deploy`)
+### 4. Flujo de ramas (Git)
+
+| Rama | Uso | Workflow |
+|------|-----|----------|
+| `main` / `develop` | Desarrollo e integración | `ci.yml` — solo build de imágenes |
+| `deploy` | Despliegue a producción (AWS) | `cd.yml` — build, ECR y deploy EC2 |
 
 ```bash
-git checkout -b deploy
-git push -u origin deploy
-```
+# Desarrollo normal en main
+git checkout main
+git merge feat/aws-ec2-cicd   # o tu rama de feature
+git push origin main          # dispara CI (build)
 
-Cada push a `deploy` ejecuta: build → push ECR → SSH deploy backend (vía bastión) → SSH deploy frontend.
-
-Para integrar cambios desde `main`:
-
-```bash
+# Publicar en AWS
 git checkout deploy
 git merge main
-git push origin deploy
+git push origin deploy        # dispara CD (despliegue)
 ```
 
 ## Comandos útiles
