@@ -8,6 +8,8 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    networks:
+      - app-network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
@@ -25,6 +27,8 @@ services:
       DB_NAME: ${DB_NAME}
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD}
+    networks:
+      - app-network
     depends_on:
       mysql:
         condition: service_healthy
@@ -40,6 +44,8 @@ services:
       DB_NAME: ${DB_NAME}
       DB_USERNAME: root
       DB_PASSWORD: ${DB_PASSWORD}
+    networks:
+      - app-network
     depends_on:
       mysql:
         condition: service_healthy
@@ -48,10 +54,19 @@ services:
     build: ./front_despacho
     image: despacho-frontend:1.0
     ports:
-      - "3000:80"
+      - "3000:8080"
+    environment:
+      BACKEND_HOST: backend-ventas
+      BACKEND_HOST_DESPACHOS: backend-despachos
+    networks:
+      - app-network
     depends_on:
       - backend-ventas
       - backend-despachos
+
+networks:
+  app-network:
+    driver: bridge
 
 volumes:
   mysql_data:
