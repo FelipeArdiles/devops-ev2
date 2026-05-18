@@ -12,12 +12,15 @@ provider "aws" {
 }
 
 ############################
-# VPC
+# VPC y subredes
 ############################
 
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = { Name = "${var.project_name}-vpc" }
 }
 
 resource "aws_subnet" "public" {
@@ -25,10 +28,31 @@ resource "aws_subnet" "public" {
   cidr_block              = "10.0.1.0/24"
   availability_zone       = "${var.aws_region}a"
   map_public_ip_on_launch = true
+
+  tags = { Name = "${var.project_name}-public" }
+}
+
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "${var.aws_region}a"
+
+  tags = { Name = "${var.project_name}-private" }
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
+}
+
+resource "aws_eip" "nat" {
+  domain     = "vpc"
+  depends_on = [aws_internet_gateway.main]
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public.id
+  depends_on    = [aws_internet_gateway.main]
 }
 
 resource "aws_route_table" "public" {
@@ -40,26 +64,36 @@ resource "aws_route_table" "public" {
   }
 }
 
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+}
+
 resource "aws_route_table_association" "public" {
   subnet_id      = aws_subnet.public.id
   route_table_id = aws_route_table.public.id
 }
 
+resource "aws_route_table_association" "private" {
+  subnet_id      = aws_subnet.private.id
+  route_table_id = aws_route_table.private.id
+}
+
 ############################
-# SECURITY GROUP
+# Security Groups
 ############################
 
-resource "aws_security_group" "main" {
-  name   = "${var.project_name}-sg"
-  vpc_id = aws_vpc.main.id
+resource "aws_security_group" "frontend" {
+  name        = "${var.project_name}-frontend-sg"
+  description = "Solo frontend accesible desde Internet"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
+    description = "HTTP publico"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -67,26 +101,69 @@ resource "aws_security_group" "main" {
   }
 
   ingress {
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  
-  ingress {
-    from_port   = 8081
-    to_port     = 8081
+    description = "SSH administracion"
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # MySQL entre ECS y EC2 (mismo security group). Debe ir inline:
-  # una regla separada aws_security_group_rule se pierde al actualizar este SG.
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "backend" {
+  name        = "${var.project_name}-backend-sg"
+  description = "Backends solo desde frontend (subred privada)"
+  vpc_id      = aws_vpc.main.id
+
   ingress {
-    from_port = 3306
-    to_port   = 3306
-    protocol  = "tcp"
-    self      = true
+    description     = "API ventas desde frontend"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.frontend.id]
+  }
+
+  ingress {
+    description     = "API despachos desde frontend"
+    from_port       = 8081
+    to_port         = 8081
+    protocol        = "tcp"
+    security_groups = [aws_security_group.frontend.id]
+  }
+
+  ingress {
+    description     = "SSH desde frontend (bastion para CI/CD)"
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.frontend.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "mysql" {
+  name        = "${var.project_name}-mysql-sg"
+  description = "MySQL solo desde backends"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "MySQL desde backends"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.backend.id]
   }
 
   egress {
@@ -98,23 +175,42 @@ resource "aws_security_group" "main" {
 }
 
 ############################
-# ECR
+# ECR (creados en etapa_1)
 ############################
 
 data "aws_ecr_repository" "backend_ventas" {
-  name         = "${var.project_name}-backend-ventas"
+  name = "${var.project_name}-backend-ventas"
 }
 
 data "aws_ecr_repository" "backend_despachos" {
-  name         = "${var.project_name}-backend-despachos"
+  name = "${var.project_name}-backend-despachos"
 }
 
 data "aws_ecr_repository" "frontend" {
-  name         = "${var.project_name}-frontend"
+  name = "${var.project_name}-frontend"
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  ecr_registry = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
 }
 
 ############################
-# EC2 MYSQL
+# IAM para EC2 (pull ECR)
+############################
+
+data "aws_iam_role" "lab" {
+  name = "LabRole"
+}
+
+resource "aws_iam_instance_profile" "ec2" {
+  name = "${var.project_name}-ec2-profile"
+  role = data.aws_iam_role.lab.name
+}
+
+############################
+# AMI
 ############################
 
 data "aws_ami" "amazon_linux" {
@@ -127,245 +223,80 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
+############################
+# EC2 MySQL (subred privada + volumen Docker)
+############################
+
 resource "aws_instance" "db" {
-  ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.main.id]
-  key_name               = var.key_pair_name
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.private.id
+  vpc_security_group_ids      = [aws_security_group.mysql.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  associate_public_ip_address = false
 
   root_block_device {
     volume_size = 20
     volume_type = "gp3"
   }
 
-  user_data = <<-EOF
-    #!/bin/bash
+  user_data = templatefile("${path.module}/templates/mysql_user_data.sh", {
+    db_password = var.db_password
+    db_name     = var.db_name
+  })
 
-    yum update -y
-    yum install -y docker
-
-    systemctl start docker
-    systemctl enable docker
-
-    until docker info > /dev/null 2>&1; do
-      echo "Esperando Docker..."
-      sleep 3
-    done
-
-    docker system prune -af
-
-    docker run -d \
-    --name mysql \
-    -e MYSQL_ROOT_PASSWORD=${var.db_password} \
-    -e MYSQL_DATABASE=${var.db_name} \
-    -e MYSQL_ROOT_HOST=% \
-    -p 3306:3306 \
-    --log-opt max-size=10m \
-    --log-opt max-file=3 \
-    mysql:8-oracle \
-    --bind-address=0.0.0.0 \
-    --performance-schema=OFF
-  EOF
-
-  tags = {
-    Name = "${var.project_name}-mysql"
-  }
-}
-
-#CLOUD WATCH
-resource "aws_cloudwatch_log_group" "ecs" {
-  name              = "/ecs/${var.project_name}"
-  retention_in_days = 7
+  tags = { Name = "${var.project_name}-mysql" }
 }
 
 ############################
-# ECS
+# EC2 Backend (subred privada)
 ############################
 
-resource "aws_ecs_cluster" "main" {
-  name = "${var.project_name}-cluster"
-}
+resource "aws_instance" "backend" {
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.small"
+  subnet_id                   = aws_subnet.private.id
+  vpc_security_group_ids      = [aws_security_group.backend.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2.name
+  associate_public_ip_address = false
 
-data "aws_iam_role" "lab" {
-  name = "LabRole"
-}
+  depends_on = [aws_instance.db]
 
-############################
-# TASK APP
-############################
+  user_data = templatefile("${path.module}/templates/backend_user_data.sh", {
+    aws_region      = var.aws_region
+    ecr_registry    = local.ecr_registry
+    project_name    = var.project_name
+    db_endpoint     = aws_instance.db.private_ip
+    db_name         = var.db_name
+    db_password     = var.db_password
+    image_ventas    = "${local.ecr_registry}/${var.project_name}-backend-ventas:latest"
+    image_despachos = "${local.ecr_registry}/${var.project_name}-backend-despachos:latest"
+  })
 
-resource "aws_ecs_task_definition" "app" {
-  family                   = "${var.project_name}-app"
-  network_mode             = "awsvpc"
-  requires_compatibilities = ["FARGATE"]
-  cpu                      = "1024"
-  memory                   = "4096"
-  execution_role_arn       = data.aws_iam_role.lab.arn
-
-  container_definitions = jsonencode([
-    {
-      name  = "backend-ventas"
-      image = "${data.aws_ecr_repository.backend_ventas.repository_url}:latest"
-
-      portMappings = [
-        {
-          containerPort = 8080
-        }
-      ]
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8080/actuator/health/readiness || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 5
-        startPeriod = 120
-      }
-
-      environment = [
-        {
-            name  = "JAVA_TOOL_OPTIONS",
-            value = "-Xmx896m -Xms256m"
-        },
-        {
-            name  = "DB_ENDPOINT",
-            value = aws_instance.db.private_ip
-        },
-        {
-            name  = "DB_PORT",
-            value = "3306"
-        },
-        {
-            name  = "DB_NAME",
-            value = var.db_name
-        },
-        {
-            name  = "DB_USERNAME",
-            value = "root"
-        },
-        {
-            name  = "DB_PASSWORD",
-            value = var.db_password
-        }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
-          awslogs-region        = var.aws_region,
-          awslogs-stream-prefix = "backend-ventas"
-        }
-      }
-    },
-    {
-      name  = "backend-despachos"
-      image = "${data.aws_ecr_repository.backend_despachos.repository_url}:latest"
-
-      portMappings = [
-        {
-          containerPort = 8081
-        }
-      ]
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8081/actuator/health/readiness || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 5
-        startPeriod = 120
-      }
-
-      dependsOn = [
-        {
-          containerName = "backend-ventas",
-          condition     = "HEALTHY"
-        }
-      ]
-
-      environment = [
-        {
-            name  = "JAVA_TOOL_OPTIONS",
-            value = "-Xmx896m -Xms256m"
-        },
-        {
-            name  = "DB_ENDPOINT",
-            value = aws_instance.db.private_ip
-        },
-        {
-            name  = "DB_PORT",
-            value = "3306"
-        },
-        {
-            name  = "DB_NAME",
-            value = var.db_name
-        },
-        {
-            name  = "DB_USERNAME",
-            value = "root"
-        },
-        {
-            name  = "DB_PASSWORD",
-            value = var.db_password
-        }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
-          awslogs-region        = var.aws_region,
-          awslogs-stream-prefix = "backend-despachos"
-        }
-      }
-    },
-    {
-      name  = "frontend"
-      image = "${data.aws_ecr_repository.frontend.repository_url}:latest"
-
-      portMappings = [
-        {
-          containerPort = 80
-        }
-      ]
-
-      dependsOn = [
-        {
-          containerName = "backend-ventas",
-          condition     = "HEALTHY"
-        },
-        {
-          containerName = "backend-despachos",
-          condition     = "HEALTHY"
-        }
-      ]
-      logConfiguration = {
-        logDriver = "awslogs",
-        options = {
-          awslogs-group         = aws_cloudwatch_log_group.ecs.name,
-          awslogs-region        = var.aws_region,
-          awslogs-stream-prefix = "frontend"
-        }
-      }
-    }
-  ])
+  tags = { Name = "${var.project_name}-backend" }
 }
 
 ############################
-# SERVICE
+# EC2 Frontend (subred publica)
 ############################
 
-resource "aws_ecs_service" "app" {
-  name            = "app"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.app.arn
-  launch_type     = "FARGATE"
-  desired_count   = 1
+resource "aws_instance" "frontend" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.frontend.id]
+  key_name               = var.key_pair_name
+  iam_instance_profile   = aws_iam_instance_profile.ec2.name
 
-  force_new_deployment = true
+  depends_on = [aws_instance.backend]
 
-  deployment_minimum_healthy_percent = 0
-  deployment_maximum_percent         = 100
+  user_data = templatefile("${path.module}/templates/frontend_user_data.sh", {
+    aws_region     = var.aws_region
+    ecr_registry   = local.ecr_registry
+    project_name   = var.project_name
+    backend_host   = aws_instance.backend.private_ip
+    image_frontend = "${local.ecr_registry}/${var.project_name}-frontend:latest"
+  })
 
-  network_configuration {
-    subnets          = [aws_subnet.public.id]
-    security_groups  = [aws_security_group.main.id]
-    assign_public_ip = true
-  }
+  tags = { Name = "${var.project_name}-frontend" }
 }
