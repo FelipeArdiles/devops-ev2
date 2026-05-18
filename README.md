@@ -251,36 +251,92 @@ Configurar en **Settings → Secrets and variables → Actions**:
 
 ## Diagrama de arquitectura
 
-```mermaid
-flowchart TB
-    Internet([Internet])
-    GH[GitHub Actions\nrama deploy]
-    ECR[(Amazon ECR)]
+### Vista general (estilo AWS)
 
-    subgraph VPC["VPC 10.0.0.0/16"]
-        subgraph Public["Subred pública 10.0.1.0/24"]
-            IGW[Internet Gateway]
-            FE[EC2 Frontend\nnginx :80]
+![Diagrama de arquitectura AWS](docs/arquitectura-aws.png)
+
+> Iconografía inspirada en [AWS Architecture Icons](https://aws.amazon.com/architecture/icons/).  
+> Colores de referencia: naranja AWS `#FF9900`, fondo oscuro `#232F3E`.
+
+### Vista interactiva (Mermaid)
+
+Leyenda: **azul** = subred pública · **violeta** = subred privada · **naranja** = servicios AWS/compute · **gris oscuro** = red y CI/CD
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '13px', 'lineColor': '#232F3E'}}}%%
+flowchart TB
+    USUARIO(["👤 Usuario / Internet"])
+    DEV(["👨‍💻 Dev · rama deploy"])
+
+    subgraph AWS["☁️  AWS Cloud · us-east-1"]
+        direction TB
+
+        subgraph CICD["Pipeline CI/CD"]
+            direction LR
+            GH["⚙️ GitHub Actions<br/><i>build · push · SSH</i>"]
+            ECR[("📦 Amazon ECR<br/>3 repositorios")]
+            GH -->|"① build & push"| ECR
         end
-        subgraph Private["Subred privada 10.0.2.0/24"]
-            NAT[NAT Gateway]
-            BE[EC2 Backend\nVentas :8080\nDespachos :8081]
-            DB[(EC2 MySQL\nvolumen Docker)]
+
+        subgraph VPC["🔒 Amazon VPC · 10.0.0.0/16"]
+            direction TB
+
+            subgraph PUB["🌐 Subred pública · 10.0.1.0/24"]
+                direction TB
+                IGW["🔗 Internet Gateway"]
+                FE["🖥️ Amazon EC2 · frontend<br/>nginx · puerto <b>80</b><br/><i>único acceso Internet</i>"]
+            end
+
+            subgraph PRIV["🔐 Subred privada · 10.0.2.0/24"]
+                direction TB
+                NAT["↔️ NAT Gateway"]
+                BE["🖥️ Amazon EC2 · backend<br/>Ventas <b>8080</b> · Despachos <b>8081</b>"]
+                DB[("🗄️ Amazon EC2 · MySQL<br/>Docker + volumen persistente")]
+            end
+
+            FE -->|"② API proxy<br/>(IP privada)"| BE
+            BE -->|"③ JDBC :3306"| DB
+            BE --> NAT
+            DB --> NAT
+            NAT --> IGW
         end
+
+        ECR -.->|"④ docker pull"| FE
+        ECR -.->|"④ docker pull"| BE
+        GH -.->|"⑤ SSH deploy"| FE
+        GH -.->|"⑤ SSH bastión"| BE
     end
 
-    Internet -->|HTTP :80| FE
-    FE -->|proxy privado| BE
-    BE -->|JDBC :3306| DB
-    GH -->|push imágenes| ECR
-    GH -->|SSH deploy| FE
-    GH -->|SSH vía bastión| BE
-    BE -->|pull imágenes| ECR
-    FE -->|pull imágenes| ECR
-    NAT --> Internet
-    BE --> NAT
-    DB --> NAT
+    USUARIO -->|"HTTP :80"| FE
+    DEV --> GH
+    IGW --> USUARIO
+
+    classDef internet fill:#E5E7EB,stroke:#6B7280,color:#111827
+    classDef cicd fill:#232F3E,stroke:#FF9900,color:#FFFFFF
+    classDef ecr fill:#FF9900,stroke:#232F3E,color:#232F3E
+    classDef pubSubnet fill:#DBEAFE,stroke:#2563EB,color:#1E40AF
+    classDef privSubnet fill:#EDE9FE,stroke:#7C3AED,color:#5B21B6
+    classDef compute fill:#FF9900,stroke:#232F3E,color:#232F3E
+    classDef network fill:#232F3E,stroke:#FF9900,color:#FFFFFF
+    classDef data fill:#059669,stroke:#047857,color:#FFFFFF
+
+    class USUARIO,DEV internet
+    class GH network
+    class ECR ecr
+    class IGW,NAT network
+    class FE,BE compute
+    class DB data
 ```
+
+#### Flujo resumido
+
+| Paso | Qué ocurre |
+|------|------------|
+| ① | GitHub Actions construye imágenes y las sube a **ECR** |
+| ② | El **frontend** (público) enruta `/api/*` al **backend** por red privada |
+| ③ | Los backends persisten datos en **MySQL** (volumen Docker) |
+| ④ | Las EC2 privadas descargan imágenes desde ECR vía **NAT** |
+| ⑤ | El pipeline despliega en EC2 por **SSH** (frontend como bastión al backend) |
 
 ---
 
