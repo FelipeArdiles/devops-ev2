@@ -16,6 +16,17 @@ Solo el **frontend** es accesible desde Internet. El tráfico hacia los backends
 
 ---
 
+## Equipo
+
+| Integrante | Rol principal | Contacto |
+|------------|---------------|----------|
+| Felipe Ardiles | Infraestructura AWS, Docker, CI/CD, Terraform | Repositorio principal |
+| Renato Herrera | Desarrollo backend, apoyo en despliegue y documentación | idkraes17@gmail.com |
+
+Los commits del proyecto EP2 incluyen coautoría de **Renato Herrera** (`Co-authored-by`) cuando corresponde a trabajo en pareja.
+
+---
+
 ## Componentes de la aplicación
 
 | Servicio | Tecnología | Despliegue |
