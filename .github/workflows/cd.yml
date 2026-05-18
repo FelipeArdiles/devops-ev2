@@ -3,57 +3,88 @@ name: Despliegue continuo
 on:
   push:
     branches:
-      - main
+      - deploy
 
 env:
   AWS_REGION: us-east-1
-  CLUSTER: devops-u2-cluster
-  SERVICE: app
+  PROJECT_NAME: devops-u2
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v3
-      
-      - name: Configurar las credenciales de AWS
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY_ID}}
-          aws-secret-access-key: ${{secrets.AWS_SECRET_ACCESS_KEY}}
-          aws-session-token: ${{secrets.AWS_SESSION_TOKEN}}
-          aws-region: ${{env.AWS_REGION}}
-      
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Login en ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build y Push del backend de ventas
+      - name: Build y push backend ventas
         run: |
+          REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE="${REGISTRY}/${{ env.PROJECT_NAME }}-backend-ventas:latest"
           docker build --platform linux/amd64 \
-          -t ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend-ventas:latest \
-          ./back-Ventas_SpringBoot/Springboot-API-REST
-          docker push ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend-ventas:latest
+            -t "$IMAGE" \
+            ./back-Ventas_SpringBoot/Springboot-API-REST
+          docker push "$IMAGE"
 
-      - name: Build y Push del backend de despachos
+      - name: Build y push backend despachos
         run: |
+          REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE="${REGISTRY}/${{ env.PROJECT_NAME }}-backend-despachos:latest"
           docker build --platform linux/amd64 \
-          -t ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend-despachos:latest \
-          ./back-Despachos_SpringBoot/Springboot-API-REST-DESPACHO
-          docker push ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-backend-despachos:latest
+            -t "$IMAGE" \
+            ./back-Despachos_SpringBoot/Springboot-API-REST-DESPACHO
+          docker push "$IMAGE"
 
-      - name: Build y Push del frontend
+      - name: Build y push frontend
         run: |
+          REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          IMAGE="${REGISTRY}/${{ env.PROJECT_NAME }}-frontend:latest"
           docker build --platform linux/amd64 \
-          -t ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-frontend:latest \
-          ./front_despacho
-          docker push ${{secrets.AWS_ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/devops-u2-frontend:latest
+            -t "$IMAGE" \
+            ./front_despacho
+          docker push "$IMAGE"
 
-      - name: Forzar redespliegue en ECS
+      - name: Configurar SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+      - name: Desplegar backends en EC2 privada (vía bastión)
+        env:
+          FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+          BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
         run: |
-          aws ecs update-service \
-          --cluster ${{env.CLUSTER}} \
-          --service ${{env.SERVICE}} \
-          --force-new-deployment
+          ssh -o StrictHostKeyChecking=no -A ec2-user@"${FRONTEND_HOST}" \
+            "ssh -o StrictHostKeyChecking=no ec2-user@${BACKEND_HOST} 'sudo /opt/app/deploy.sh'"
+
+      - name: Desplegar frontend en EC2 pública
+        env:
+          FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ec2-user@"${FRONTEND_HOST}" 'sudo /opt/app/deploy.sh'
+
+      - name: Verificar frontend
+        env:
+          FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf "http://${FRONTEND_HOST}/" >/dev/null; then
+              echo "Frontend OK en http://${FRONTEND_HOST}/"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Frontend no respondió a tiempo"
+          exit 1
