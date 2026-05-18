@@ -66,14 +66,19 @@ jobs:
           FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
           BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
         run: |
-          ssh -o StrictHostKeyChecking=no -A ec2-user@"${FRONTEND_HOST}" \
-            "ssh -o StrictHostKeyChecking=no ec2-user@${BACKEND_HOST} 'sudo /opt/app/deploy.sh'"
+          PROXY_CMD="ssh -o StrictHostKeyChecking=no -W %h:%p ec2-user@${FRONTEND_HOST}"
+          ssh -o StrictHostKeyChecking=no -o "ProxyCommand=${PROXY_CMD}" \
+            ec2-user@"${BACKEND_HOST}" 'sudo /opt/app/deploy.sh'
 
       - name: Desplegar frontend en EC2 pública
         env:
           FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+          BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@"${FRONTEND_HOST}" 'sudo /opt/app/deploy.sh'
+          ssh -o StrictHostKeyChecking=no ec2-user@"${FRONTEND_HOST}" \
+            "sudo sed -i 's/^BACKEND_HOST=.*/BACKEND_HOST=${BACKEND_HOST}/' /opt/app/.env && \
+             sudo sed -i 's/^BACKEND_HOST_DESPACHOS=.*/BACKEND_HOST_DESPACHOS=${BACKEND_HOST}/' /opt/app/.env && \
+             sudo /opt/app/deploy.sh"
 
       - name: Verificar frontend
         env:

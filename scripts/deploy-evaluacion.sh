@@ -60,7 +60,8 @@ check_prereqs() {
 }
 
 tf_vars_etapa2() {
-  echo -var="db_password=${DB_PASSWORD}" \
+  echo -var="db_user=${DB_USER}" \
+       -var="db_password=${DB_PASSWORD}" \
        -var="db_name=${DB_NAME}" \
        -var="key_pair_name=${KEY_PAIR_NAME}"
 }
@@ -165,17 +166,24 @@ deploy_remote() {
   fi
   chmod 600 "${SSH_KEY_PATH}" 2>/dev/null || true
 
-  log "Esperando cloud-init en instancias (90s)..."
-  sleep 90
+  eval "$(ssh-agent -s)" >/dev/null
+  ssh-add "${SSH_KEY_PATH}"
+
+  log "Esperando cloud-init en instancias (60s)..."
+  sleep 60
 
   log "Desplegando backends en ${backend_ip} vía bastión ${frontend_ip}..."
+  local proxy_cmd="ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no -W %h:%p ec2-user@${frontend_ip}"
   # shellcheck disable=SC2046
-  ssh $(ssh_opts) -A "ec2-user@${frontend_ip}" \
-    "ssh -o StrictHostKeyChecking=no ec2-user@${backend_ip} 'sudo /opt/app/deploy.sh'"
+  ssh $(ssh_opts) -o "ProxyCommand=${proxy_cmd}" \
+    "ec2-user@${backend_ip}" 'sudo /opt/app/deploy.sh'
 
-  log "Desplegando frontend en ${frontend_ip}..."
+  log "Desplegando frontend en ${frontend_ip} (backend ${backend_ip})..."
   # shellcheck disable=SC2046
-  ssh $(ssh_opts) "ec2-user@${frontend_ip}" 'sudo /opt/app/deploy.sh'
+  ssh $(ssh_opts) "ec2-user@${frontend_ip}" \
+    "sudo sed -i 's/^BACKEND_HOST=.*/BACKEND_HOST=${backend_ip}/' /opt/app/.env && \
+     sudo sed -i 's/^BACKEND_HOST_DESPACHOS=.*/BACKEND_HOST_DESPACHOS=${backend_ip}/' /opt/app/.env && \
+     sudo /opt/app/deploy.sh"
 }
 
 wait_for_http() {
@@ -276,6 +284,21 @@ cmd_pipeline() {
   log "App: http://${frontend_ip}/"
 }
 
+cmd_redeploy() {
+  check_prereqs
+  local frontend_ip backend_ip
+  frontend_ip="$(get_tf_output frontend_public_ip)"
+  backend_ip="$(get_tf_output backend_private_ip)"
+  if [[ -z "${frontend_ip}" || -z "${backend_ip}" ]]; then
+    err "No hay outputs de Terraform."
+    exit 1
+  fi
+  log "Redespliegue SSH (sin rebuild Docker)..."
+  deploy_remote "${frontend_ip}" "${backend_ip}"
+  wait_for_http "http://${frontend_ip}/" || true
+  log "App: http://${frontend_ip}/"
+}
+
 cmd_status() {
   check_prereqs
   local frontend_ip backend_ip mysql_ip
@@ -301,6 +324,7 @@ main() {
     deploy)   cmd_deploy "$@" ;;
     destroy)  cmd_destroy ;;
     pipeline) cmd_pipeline ;;
+    redeploy) cmd_redeploy ;;
     status)   cmd_status ;;
     -h|--help|help|"") usage ;;
     *)

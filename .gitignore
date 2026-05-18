@@ -1,5 +1,6 @@
 .env
 scripts/deploy.env
+*.pem
 .DS_Store
 node_modules/
 dist/

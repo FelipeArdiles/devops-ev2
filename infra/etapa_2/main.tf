@@ -257,8 +257,14 @@ resource "aws_instance" "backend" {
   instance_type               = "t3.small"
   subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.backend.id]
+  key_name                    = var.key_pair_name
   iam_instance_profile        = aws_iam_instance_profile.ec2.name
   associate_public_ip_address = false
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
 
   depends_on = [aws_instance.db]
 

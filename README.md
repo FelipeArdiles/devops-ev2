@@ -43,7 +43,7 @@ aws configure
 
 ```bash
 cp scripts/deploy.env.example scripts/deploy.env
-# Edita SSH_KEY_PATH si tu vockey.pem está en otra ruta
+# Copia deploy.env.example a deploy.env (KEY_PAIR_NAME=vockey, SSH en ~/.ssh/vockey.pem)
 
 chmod +x scripts/deploy-evaluacion.sh
 ./scripts/deploy-evaluacion.sh deploy
@@ -61,7 +61,7 @@ En el repositorio → **Settings → Secrets and variables → Actions**:
 | `AWS_SECRET_ACCESS_KEY` | Del lab |
 | `AWS_SESSION_TOKEN` | Del lab (obligatorio en sesiones temporales) |
 | `AWS_ACCOUNT_ID` | ID de cuenta AWS |
-| `EC2_SSH_PRIVATE_KEY` | Contenido completo del archivo `.pem` (vockey) |
+| `EC2_SSH_PRIVATE_KEY` | Contenido completo de `~/.ssh/vockey.pem` (Download PEM del lab) |
 | `EC2_FRONTEND_HOST` | IP pública del frontend (`terraform output frontend_public_ip`) |
 | `EC2_BACKEND_PRIVATE_IP` | IP privada del backend (`terraform output backend_private_ip`) |
 
