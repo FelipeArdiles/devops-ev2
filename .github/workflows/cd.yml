@@ -56,18 +56,61 @@ jobs:
             ./front_despacho
           docker push "$IMAGE"
 
-      - name: Configurar SSH
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+      - name: Preparar clave SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keygen -y -f ~/.ssh/ec2.pem >/dev/null 2>&1 || {
+            echo "::error::EC2_SSH_PRIVATE_KEY inválida. Pega el contenido completo de vockey.pem (incluye BEGIN/END)."
+            exit 1
+          }
+
+      - name: Verificar secrets e IP del frontend
+        env:
+          FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+          BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
+        run: |
+          if [ -z "$FRONTEND_HOST" ]; then
+            echo "::error::EC2_FRONTEND_HOST vacío. Tras terraform apply: terraform output -raw frontend_public_ip"
+            exit 1
+          fi
+          if [ -z "$BACKEND_HOST" ]; then
+            echo "::error::EC2_BACKEND_PRIVATE_IP vacío. Tras terraform apply: terraform output -raw backend_private_ip"
+            exit 1
+          fi
+          if echo "$FRONTEND_HOST" | grep -qE '://|/| '; then
+            echo "::error::EC2_FRONTEND_HOST debe ser solo la IP pública (sin http:// ni espacios)."
+            exit 1
+          fi
+          if ! echo "$FRONTEND_HOST" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::EC2_FRONTEND_HOST no parece una IPv4. Usa terraform output frontend_public_ip"
+            exit 1
+          fi
+          if ! echo "$BACKEND_HOST" | grep -qE '^10\.'; then
+            echo "::warning::EC2_BACKEND_PRIVATE_IP debería ser 10.0.x.x (subred privada)."
+          fi
+
+      - name: Probar SSH al frontend (bastión)
+        env:
+          FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
+        run: |
+          ssh -i ~/.ssh/ec2.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=20 \
+            -o BatchMode=yes \
+            ec2-user@"${FRONTEND_HOST}" "echo SSH al frontend OK"
 
       - name: Desplegar backends en EC2 privada (vía bastión)
         env:
           FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
           BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
         run: |
-          PROXY_CMD="ssh -o StrictHostKeyChecking=no -W %h:%p ec2-user@${FRONTEND_HOST}"
-          ssh -o StrictHostKeyChecking=no -o "ProxyCommand=${PROXY_CMD}" \
+          PROXY_CMD="ssh -i ~/.ssh/ec2.pem -o StrictHostKeyChecking=no -o ConnectTimeout=20 -W %h:%p ec2-user@${FRONTEND_HOST}"
+          ssh -i ~/.ssh/ec2.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=20 \
+            -o "ProxyCommand=${PROXY_CMD}" \
             ec2-user@"${BACKEND_HOST}" 'sudo /opt/app/deploy.sh'
 
       - name: Desplegar frontend en EC2 pública
@@ -75,7 +118,10 @@ jobs:
           FRONTEND_HOST: ${{ secrets.EC2_FRONTEND_HOST }}
           BACKEND_HOST: ${{ secrets.EC2_BACKEND_PRIVATE_IP }}
         run: |
-          ssh -o StrictHostKeyChecking=no ec2-user@"${FRONTEND_HOST}" \
+          ssh -i ~/.ssh/ec2.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=20 \
+            ec2-user@"${FRONTEND_HOST}" \
             "sudo sed -i 's/^BACKEND_HOST=.*/BACKEND_HOST=${BACKEND_HOST}/' /opt/app/.env && \
              sudo sed -i 's/^BACKEND_HOST_DESPACHOS=.*/BACKEND_HOST_DESPACHOS=${BACKEND_HOST}/' /opt/app/.env && \
              sudo /opt/app/deploy.sh"
