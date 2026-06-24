@@ -1,0 +1,9 @@
+# Copia como terraform.tfvars (no subir a Git)
+
+db_password            = "root"
+db_name                = "proyecto_db"
+project_name           = "devops-u2"
+aws_region             = "us-east-1"
+autoscaling_target_cpu = 50
+service_desired_count  = 1
+service_max_count      = 3
