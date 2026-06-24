@@ -1,37 +1,50 @@
 name: Integracion continua
 
 on:
+  pull_request:
+    branches:
+      - develop
+      - main
   push:
     branches:
       - main
       - develop
-  pull_request:
-    branches:
-      - main
-      - develop
+      - feature/**
+      - fix/**
 
 jobs:
-  build:
+  validar-docker:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout del código
+      - name: Checkout del codigo
         uses: actions/checkout@v4
 
-      - name: Build backend ventas
-        run: |
-          docker build \
-            -t ventas-backend:ci \
-            ./back-Ventas_SpringBoot/Springboot-API-REST
+      - name: Configurar archivo de entorno
+        run: cp .env.example .env
 
-      - name: Build backend despachos
-        run: |
-          docker build \
-            -t despachos-backend:ci \
-            ./back-Despachos_SpringBoot/Springboot-API-REST-DESPACHO
+      - name: Construir imagenes Docker
+        run: docker compose build
 
-      - name: Build frontend
+      - name: Levantar servicios y verificar salud
         run: |
-          docker build \
-            -t despacho-frontend:ci \
-            ./front_despacho
+          docker compose up -d
+          echo "Esperando APIs Spring Boot (puede tardar hasta 3 min)..."
+          for i in $(seq 1 18); do
+            if curl -sf http://localhost/api/v1/ventas > /dev/null \
+              && curl -sf http://localhost/api/v1/despachos > /dev/null; then
+              echo "APIs OK en intento ${i}"
+              exit 0
+            fi
+            echo "Intento ${i}/18 - backends aun iniciando..."
+            sleep 10
+          done
+          echo "=== Logs backend ventas ==="
+          docker compose logs backend-ventas --tail 40
+          echo "=== Logs backend despachos ==="
+          docker compose logs backend-despachos --tail 40
+          exit 1
+
+      - name: Detener contenedores
+        if: always()
+        run: docker compose down -v

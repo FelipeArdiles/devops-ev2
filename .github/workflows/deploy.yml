@@ -1,0 +1,160 @@
+name: Despliegue continuo ECS
+
+on:
+  push:
+    branches:
+      - deploy
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: devops-u2
+  ECS_CLUSTER: devops-u2-cluster
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      - name: Inicio del pipeline
+        run: echo "PIPELINE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login en Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build y push backend ventas
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${{ env.PROJECT_NAME }}-backend-ventas"
+          docker build --platform linux/amd64 \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ github.sha }}" \
+            "./backend/ventas"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+      - name: Build y push backend despachos
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${{ env.PROJECT_NAME }}-backend-despachos"
+          docker build --platform linux/amd64 \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ github.sha }}" \
+            "./backend/despachos"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+      - name: Build y push frontend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${{ env.PROJECT_NAME }}-frontend"
+          docker build --platform linux/amd64 \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${{ github.sha }}" \
+            "./frontend"
+          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${{ github.sha }}"
+
+      - name: Redesplegar servicios ECS
+        run: |
+          set -euo pipefail
+          CLUSTER="${{ env.ECS_CLUSTER }}"
+          MYSQL="${{ env.PROJECT_NAME }}-mysql"
+          SERVICES=(
+            "${{ env.PROJECT_NAME }}-frontend"
+            "${{ env.PROJECT_NAME }}-backend-ventas"
+            "${{ env.PROJECT_NAME }}-backend-despachos"
+          )
+
+          echo "Verificando MySQL estable antes del redeploy..."
+          if ! aws ecs wait services-stable --cluster "${CLUSTER}" --services "${MYSQL}"; then
+            echo "MySQL no estable — revisar target group NLB y logs /ecs/${{ env.PROJECT_NAME }}/mysql"
+            aws ecs describe-services --cluster "${CLUSTER}" --services "${MYSQL}" \
+              --query 'services[0].events[0:5]' --output table
+            exit 1
+          fi
+
+          for SERVICE in "${SERVICES[@]}"; do
+            echo "Forzando nuevo despliegue: ${SERVICE}"
+            aws ecs update-service \
+              --cluster "${CLUSTER}" \
+              --service "${SERVICE}" \
+              --force-new-deployment \
+              --output text > /dev/null
+          done
+
+          echo "Esperando estabilidad de servicios (max ~20 min)..."
+          MAX_ATTEMPTS=80
+          for attempt in $(seq 1 "${MAX_ATTEMPTS}"); do
+            STABLE=true
+            for SERVICE in "${SERVICES[@]}"; do
+              read -r ROLLOUT RUNNING DESIRED PENDING <<< "$(aws ecs describe-services \
+                --cluster "${CLUSTER}" \
+                --services "${SERVICE}" \
+                --query 'services[0].[deployments[?status==`PRIMARY`]|[0].rolloutState,runningCount,desiredCount,pendingCount]' \
+                --output text)"
+              if [ "${ROLLOUT:-}" != "COMPLETED" ] || [ "${RUNNING:-0}" != "${DESIRED:-0}" ] || [ "${PENDING:-0}" != "0" ]; then
+                STABLE=false
+                echo "  ${SERVICE}: rollout=${ROLLOUT:-unknown}, running=${RUNNING:-0}/${DESIRED:-0}, pending=${PENDING:-0}"
+              fi
+            done
+            if [ "${STABLE}" = "true" ]; then
+              echo "Todos los servicios estables en intento ${attempt}"
+              exit 0
+            fi
+            sleep 15
+          done
+
+          echo "=== Timeout esperando estabilidad — diagnostico ==="
+          aws ecs describe-services --cluster "${CLUSTER}" --services "${SERVICES[@]}" \
+            --query 'services[].{name:serviceName,running:runningCount,desired:desiredCount,deployments:deployments,events:events[0:5]}' \
+            --output json
+          exit 1
+
+      - name: Verificar aplicacion via ALB
+        env:
+          ALB_DNS: ${{ secrets.ECS_ALB_DNS_NAME }}
+        run: |
+          set -e
+          echo "Esperando APIs Spring Boot en ALB..."
+          for i in $(seq 1 24); do
+            if curl -sf "http://${ALB_DNS}/api/v1/ventas" > /dev/null \
+              && curl -sf "http://${ALB_DNS}/api/v1/despachos" > /dev/null \
+              && curl -sf "http://${ALB_DNS}/" > /dev/null; then
+              echo "Aplicacion OK en intento ${i}"
+              echo "Frontend: http://${ALB_DNS}"
+              exit 0
+            fi
+            echo "Intento ${i}/24 - servicios aun iniciando..."
+            sleep 15
+          done
+          echo "=== Estado servicios ECS ==="
+          aws ecs describe-services --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.PROJECT_NAME }}-frontend" \
+                       "${{ env.PROJECT_NAME }}-backend-ventas" \
+                       "${{ env.PROJECT_NAME }}-backend-despachos" \
+            --query 'services[].{name:serviceName,running:runningCount,desired:desiredCount,status:status}' \
+            --output table
+          exit 1
+
+      - name: Resumen de metricas del pipeline
+        if: always()
+        run: |
+          echo "Commit desplegado: ${{ github.sha }}"
+          echo "Cluster ECS: ${{ env.ECS_CLUSTER }}"
+          echo "Inicio UTC: ${PIPELINE_START:-N/A}"
+          echo "Fin UTC: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
