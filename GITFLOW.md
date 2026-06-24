@@ -1,4 +1,4 @@
-# Git Flow - Innovatech DevOps
+# Git Flow - DevOps U2
 
 ## Ramas principales
 
