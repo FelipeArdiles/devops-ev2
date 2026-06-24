@@ -14,7 +14,7 @@ FROM nginxinc/nginx-unprivileged:alpine
 USER root
 RUN apk add --no-cache gettext
 
-COPY nginx.conf /etc/nginx/templates/nginx.local.conf
+COPY nginx.local.conf /etc/nginx/templates/nginx.local.conf
 COPY nginx.alb.conf /etc/nginx/templates/nginx.alb.conf
 COPY nginx.ec2.conf.template /etc/nginx/templates/nginx.ec2.conf.template
 COPY docker-entrypoint.sh /docker-entrypoint.sh
